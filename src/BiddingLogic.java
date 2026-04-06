@@ -18,9 +18,8 @@ public class BiddingLogic {
     private int totalSpent = 0;
     private int auctionsSeen = 0;
 
-    private double baseValue = 11.0;
+    private double baseValue = 8.0;
     private double sniperMultiplier = 3.0;
-    private double engagementWeight = 3.0;
     
     // Dynamic bidding adjustment based on summary efficiency
     private double efficiencyMultiplier = 1.0;
@@ -45,7 +44,7 @@ public class BiddingLogic {
     private String lastSegmentKey = "unknown";
     private int hardBidCap = 30;
     private final int minHardBidCap = 1;
-    private final int maxHardBidCap = 58;
+    private final int maxHardBidCap = 60;
     private double spendCatchupMultiplier = 1.0;
 
     // Adaptive feature weights
@@ -228,15 +227,30 @@ public class BiddingLogic {
             if (bidValue < marketFloor) bidValue = marketFloor;
         }
 
-        // Snipe high-value targets (Perfect matches)
-        if (isMyCat && isInterested) bidValue *= sniperMultiplier;
-
-        // Hard anti-burn caps: keep bids in realistic ranges for low-value inventory.
         int valueCap = clampInt((int) Math.round(6 + score * 3), 8, 35);
         int efficiencyCap = clampInt((int) Math.round(22 * efficiencyMultiplier), 6, 30);
+
+        if (consecutiveLosses >= 10000) { 
+            bidValue += 10; 
+            valueCap += 10; 
+            efficiencyCap += 10;
+            calculatedBidValue = bidValue; 
+        }
         int baseFinalCap = Math.min(hardBidCap, Math.min(valueCap, efficiencyCap));
         int finalBidCap = baseFinalCap;
         String capDebug = "valueCap=" + valueCap + " effCap=" + efficiencyCap + " baseCap=" + baseFinalCap;
+        
+        // Snipe high-value targets: full on perfect matches, half on partial matches.
+        if (isMyCat && isInterested) {
+            bidValue *= sniperMultiplier;
+            finalBidCap *= sniperMultiplier;
+        } else if (isMyCat || isInterested) {
+            double halfSniperMultiplier = Math.max(2.0, sniperMultiplier / 2.0);
+            bidValue *= halfSniperMultiplier;
+            finalBidCap *= halfSniperMultiplier;
+        }
+
+        // Hard anti-burn caps: keep bids in realistic ranges for low-value inventory.
         
         if (!isMyCat && !isInterested) {
             finalBidCap = Math.min(finalBidCap, 8);
@@ -263,8 +277,6 @@ public class BiddingLogic {
             capDebug += " catchup_lift=" + catchupLift + "->cap=" + catchupCap;
         }
 
-        System.err.println("BID calc=" + calculatedBidValue + " " + capDebug + " finalCap=" + finalBidCap);
-
         if (bidValue > finalBidCap) bidValue = finalBidCap;
 
         // 6. Constraints & Formatting
@@ -283,7 +295,6 @@ public class BiddingLogic {
         this.totalSpent += cost;
         this.totalWins++;
         this.intervalWins++;
-        System.err.println("WIN bid=" + lastBidValue);
 
         int totalRounds = totalWins + totalLosses;
         double winRate = (totalRounds > 0) ? (double) totalWins / totalRounds * 100.0 : 0.0;
@@ -317,8 +328,6 @@ public class BiddingLogic {
         marketPressureMultiplier = Math.min(marketPressureMultiplier * 1.02, 1.6);
         priceDiscoveryMultiplier = Math.min(priceDiscoveryMultiplier * 1.06, 1.20);
         adjustHardBidCapOnLoss();
-
-        System.err.println("LOSS bid=" + lastBidValue);
 
         recordAuctionOutcome(false, 0);
         
@@ -386,24 +395,6 @@ public class BiddingLogic {
         lastSummaryEfficiency = batchEfficiency;
 
         refreshAdaptiveWeights();
-        
-        System.err.println("Summary -> Points: " + points + " Spent: " + spent 
-            + " BatchEff: " + String.format("%.4f", batchEfficiency)
-            + " OverallEff: " + String.format("%.4f", overallEfficiency)
-            + " EffRatio: " + String.format("%.2f", efficiencyRatio)
-            + " AbsFac: " + String.format("%.2f", absoluteFactor)
-            + " WinRate: " + String.format("%.1f%%", winRate)
-            + " IntervalWR: " + String.format("%.1f%%", intervalWinRate)
-            + " EffMult: " + String.format("%.2f", efficiencyMultiplier)
-            + " PriceDisc: " + String.format("%.2f", priceDiscoveryMultiplier)
-            + " CatchUp: " + String.format("%.2f", spendCatchupMultiplier)
-            + " LossMult: " + String.format("%.2f", lossMultiplier)
-            + " MarketMult: " + String.format("%.2f", marketPressureMultiplier)
-                + " HardCap: " + hardBidCap
-            + " MandatoryNow: " + String.format("%.3f", mandatorySpendByNow)
-            + " SpendRatio: " + String.format("%.3f", spendRatio)
-            + " ClearEst: " + String.format("%.1f", clearingPriceEstimate)
-            + " Trend: " + String.format("%.2f", trend));
 
             // Reset the per-summary window after we have reacted to the latest 100 rounds.
             intervalWins = 0;
@@ -426,13 +417,6 @@ public class BiddingLogic {
         FeatureStats stats = featureStats.computeIfAbsent(feature, key -> new FeatureStats());
         if (won) stats.wins++;
         else stats.losses++;
-    }
-
-    private boolean shouldLogEvent(int totalRounds, boolean isLoss) {
-        if (isLoss && (consecutiveLosses == 5 || consecutiveLosses == 10 || consecutiveLosses > 15)) {
-            return true;
-        }
-        return totalRounds % LOG_EVERY_N_EVENTS == 0;
     }
 
     private void pruneStatsIfNeeded() {
@@ -478,7 +462,7 @@ public class BiddingLogic {
         adaptiveCategoryWeight = clamp(1.8 + (segmentSignal - 0.5) * 2.2 * momentum, 1.2, 3.8);
         adaptiveInterestWeight = clamp(1.3 + (segmentSignal - 0.5) * 1.8 * momentum, 0.8, 3.2);
         adaptiveSubscribedMultiplier = clamp(1.1 + (segmentSignal - 0.5) * 0.8, 1.0, 1.8);
-        adaptiveEngagementWeight = clamp(engagementWeight * clamp(momentum, 0.9, 1.2), 1.2, 3.5);
+        adaptiveEngagementWeight = clamp(2.7 * clamp(momentum, 0.9, 1.2), 1.2, 3.5);
     }
 
     private double getFeatureWinRate(String feature) {
